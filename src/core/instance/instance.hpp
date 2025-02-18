@@ -46,14 +46,19 @@
 
 #include "common/array.hpp"
 #include "common/as_core_type.hpp"
+#include "common/debug.hpp"
 #include "common/error.hpp"
+#include "common/heap.hpp"
+#include "common/locator.hpp"
 #include "common/log.hpp"
 #include "common/message.hpp"
 #include "common/non_copyable.hpp"
 #include "common/random.hpp"
+#include "common/serial_number.hpp"
 #include "common/tasklet.hpp"
 #include "common/time_ticker.hpp"
 #include "common/timer.hpp"
+#include "common/type_traits.hpp"
 #include "common/uptime.hpp"
 #include "diags/factory_diags.hpp"
 #include "instance/extension.hpp"
@@ -61,6 +66,7 @@
 #include "radio/radio.hpp"
 #include "utils/otns.hpp"
 #include "utils/power_calibration.hpp"
+#include "utils/static_counter.hpp"
 
 #if OPENTHREAD_FTD || OPENTHREAD_MTD
 #include "backbone_router/backbone_tmf.hpp"
@@ -73,7 +79,9 @@
 #include "common/notifier.hpp"
 #include "common/settings.hpp"
 #include "crypto/mbedtls.hpp"
+#include "crypto/storage.hpp"
 #include "mac/mac.hpp"
+#include "mac/wakeup_tx_scheduler.hpp"
 #include "meshcop/border_agent.hpp"
 #include "meshcop/commissioner.hpp"
 #include "meshcop/dataset_manager.hpp"
@@ -88,15 +96,19 @@
 #include "net/dhcp6_server.hpp"
 #include "net/dns_client.hpp"
 #include "net/dns_dso.hpp"
+#include "net/dnssd.hpp"
 #include "net/dnssd_server.hpp"
 #include "net/ip6.hpp"
 #include "net/ip6_filter.hpp"
+#include "net/mdns.hpp"
 #include "net/nat64_translator.hpp"
 #include "net/nd_agent.hpp"
 #include "net/netif.hpp"
 #include "net/sntp_client.hpp"
+#include "net/srp_advertising_proxy.hpp"
 #include "net/srp_client.hpp"
 #include "net/srp_server.hpp"
+#include "radio/ble_secure.hpp"
 #include "thread/address_resolver.hpp"
 #include "thread/announce_begin_server.hpp"
 #include "thread/announce_sender.hpp"
@@ -141,12 +153,10 @@
  *   This module includes definitions for OpenThread instance.
  *
  * @{
- *
  */
 
 /**
  * Represents an opaque (and empty) type corresponding to an OpenThread instance object.
- *
  */
 typedef struct otInstance
 {
@@ -158,14 +168,12 @@ namespace ot {
  * Represents an OpenThread instance.
  *
  * Contains all the components used by OpenThread.
- *
  */
 class Instance : public otInstance, private NonCopyable
 {
 public:
     /**
      * Represents the message buffer information (number of messages/buffers in all OT stack message queues).
-     *
      */
     class BufferInfo : public otBufferInfo, public Clearable<BufferInfo>
     {
@@ -182,7 +190,6 @@ public:
                                     number of bytes required for `Instance`.
       *
       * @returns  A pointer to the new OpenThread instance.
-      *
       */
     static Instance *Init(void *aBuffer, size_t *aBufferSize);
 
@@ -196,9 +203,26 @@ public:
      * @param[in] aIdx The index of the OpenThread instance to initialize.
      *
      * @returns  A pointer to the new OpenThread instance.
-     *
      */
     static Instance *InitMultiple(uint8_t aIdx);
+
+    /**
+     * Returns a reference to the OpenThread instance.
+     *
+     * @param[in] aIdx The index of the OpenThread instance to get.
+     *
+     * @returns A reference to the OpenThread instance.
+     */
+    static Instance &Get(uint8_t aIdx);
+
+    /**
+     * Returns the index of the OpenThread instance.
+     *
+     * @param[in] aInstance The reference of the OpenThread instance to get index.
+     *
+     * @returns The index of the OpenThread instance.
+     */
+    static uint8_t GetIdx(Instance *aInstance);
 #endif
 
 #else // OPENTHREAD_CONFIG_MULTIPLE_INSTANCE_ENABLE
@@ -210,7 +234,6 @@ public:
      * called before any other calls to OpenThread.
      *
      * @returns A reference to the single OpenThread instance.
-     *
      */
     static Instance &InitSingle(void);
 
@@ -218,7 +241,6 @@ public:
      * Returns a reference to the single OpenThread instance.
      *
      * @returns A reference to the single OpenThread instance.
-     *
      */
     static Instance &Get(void);
 #endif
@@ -230,15 +252,22 @@ public:
      * change after initialization.
      *
      * @returns The instance identifier.
-     *
      */
     uint32_t GetId(void) const { return mId; }
+
+#if OPENTHREAD_PLATFORM_NEXUS
+    /**
+     * Sets the instance identifier.
+     *
+     * @param[in] aId  The identifier to assign to the `Instance`.
+     */
+    void SetId(uint32_t aId) { mId = aId; }
+#endif
 
     /**
      * Indicates whether or not the instance is valid/initialized and not yet finalized.
      *
      * @returns TRUE if the instance is valid/initialized, FALSE otherwise.
-     *
      */
     bool IsInitialized(void) const { return mIsInitialized; }
 
@@ -247,7 +276,6 @@ public:
      *
      * The reset process ensures that all the OpenThread state/info (stored in volatile memory) is erased. Note that
      * this method does not erase any persistent state/info saved in non-volatile memory.
-     *
      */
     void Reset(void);
 
@@ -258,7 +286,6 @@ public:
      * @retval kErrorNone        Reset to bootloader successfully.
      * @retval kErrorBusy        Failed due to another operation is ongoing.
      * @retval kErrorNotCapable  Not capable of resetting to bootloader.
-     *
      */
     Error ResetToBootloader(void);
 #endif
@@ -266,7 +293,6 @@ public:
 #if OPENTHREAD_RADIO
     /**
      * Resets the internal states of the radio.
-     *
      */
     void ResetRadioStack(void);
 #endif
@@ -275,7 +301,6 @@ public:
      * Returns the active log level.
      *
      * @returns The log level.
-     *
      */
     static LogLevel GetLogLevel(void)
 #if OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE
@@ -293,7 +318,6 @@ public:
      * Sets the log level.
      *
      * @param[in] aLogLevel  A log level.
-     *
      */
     static void SetLogLevel(LogLevel aLogLevel);
 #endif
@@ -302,14 +326,12 @@ public:
      * Finalizes the OpenThread instance.
      *
      * Should be called when OpenThread instance is no longer in use.
-     *
      */
     void Finalize(void);
 
 #if OPENTHREAD_MTD || OPENTHREAD_FTD
     /**
      * Deletes all the settings stored in non-volatile memory, and then triggers a platform reset.
-     *
      */
     void FactoryReset(void);
 
@@ -320,7 +342,6 @@ public:
      *
      * @retval kErrorNone          All persistent info/state was erased successfully.
      * @retval kErrorInvalidState  Device is not in `disabled` state/role.
-     *
      */
     Error ErasePersistentInfo(void);
 
@@ -329,7 +350,6 @@ public:
      * Returns a reference to the Heap object.
      *
      * @returns A reference to the Heap object.
-     *
      */
     static Utils::Heap &GetHeap(void);
 #endif
@@ -339,7 +359,6 @@ public:
      * Returns a reference to application COAP object.
      *
      * @returns A reference to the application COAP object.
-     *
      */
     Coap::Coap &GetApplicationCoap(void) { return mApplicationCoap; }
 #endif
@@ -349,9 +368,8 @@ public:
      * Returns a reference to application COAP Secure object.
      *
      * @returns A reference to the application COAP Secure object.
-     *
      */
-    Coap::CoapSecure &GetApplicationCoapSecure(void) { return mApplicationCoapSecure; }
+    Coap::ApplicationCoapSecure &GetApplicationCoapSecure(void) { return mApplicationCoapSecure; }
 #endif
 
 #if OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE
@@ -364,7 +382,6 @@ public:
      * This is intended for testing only and available under a `REFERENCE_DEVICE` config.
      *
      * @param[in] aEnabled   TRUE to enable the "DNS name compression" mode, FALSE to disable.
-     *
      */
     static void SetDnsNameCompressionEnabled(bool aEnabled) { sDnsNameCompressionEnabled = aEnabled; }
 
@@ -372,7 +389,6 @@ public:
      * Indicates whether the "DNS name compression" mode is enabled or not.
      *
      * @returns TRUE if the "DNS name compressions" mode is enabled, FALSE otherwise.
-     *
      */
     static bool IsDnsNameCompressionEnabled(void) { return sDnsNameCompressionEnabled; }
 #endif
@@ -381,7 +397,6 @@ public:
      * Retrieves the the Message Buffer information.
      *
      * @param[out]  aInfo  A `BufferInfo` where information is written.
-     *
      */
     void GetBufferInfo(BufferInfo &aInfo);
 
@@ -390,7 +405,6 @@ public:
      * time.
      *
      * Resets `mMaxUsedBuffers` in `BufferInfo`.
-     *
      */
     void ResetBufferInfo(void);
 
@@ -407,13 +421,43 @@ public:
      * Specializations of the `Get<Type>()` method are defined in this file after the `Instance` class definition.
      *
      * @returns A reference to the `Type` object of the instance.
-     *
      */
     template <typename Type> inline Type &Get(void);
 
+#if OPENTHREAD_PLATFORM_NEXUS
+    /**
+     * Constructor to initialize an `Instance`
+     */
+    Instance(void);
+
+    /**
+     * Called after constructor initialization.
+     */
+    void AfterInit(void);
+#endif
+
 private:
+#if !OPENTHREAD_PLATFORM_NEXUS
     Instance(void);
     void AfterInit(void);
+#endif
+
+    //-----------------------------------------------------------------------------------------------------------------
+    // `static` variables
+
+#if OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE
+    static LogLevel sLogLevel;
+#endif
+
+#if (OPENTHREAD_MTD || OPENTHREAD_FTD) && !OPENTHREAD_CONFIG_HEAP_EXTERNAL_ENABLE
+    static Utils::Heap *sHeap;
+#endif
+
+#if (OPENTHREAD_MTD || OPENTHREAD_FTD) && OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE
+    static bool sDnsNameCompressionEnabled;
+#endif
+
+    //-----------------------------------------------------------------------------------------------------------------
 
     // Order of variables (their initialization in `Instance`)
     // is important.
@@ -430,11 +474,8 @@ private:
 #if OPENTHREAD_MTD || OPENTHREAD_FTD
     // Random::Manager is initialized before other objects. Note that it
     // requires MbedTls which itself may use Heap.
-#if !OPENTHREAD_CONFIG_HEAP_EXTERNAL_ENABLE
-    static Utils::Heap *sHeap;
-#endif
     Crypto::MbedTls mMbedTls;
-#endif // OPENTHREAD_MTD || OPENTHREAD_FTD
+#endif
 
     Random::Manager mRandomManager;
 
@@ -456,6 +497,16 @@ private:
     Settings       mSettings;
     SettingsDriver mSettingsDriver;
     MessagePool    mMessagePool;
+
+#if OPENTHREAD_CONFIG_PLATFORM_DNSSD_ENABLE || OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+    // DNS-SD (mDNS) platform is initialized early to
+    // allow other modules to use it.
+    Dnssd mDnssd;
+#endif
+
+#if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+    Crypto::Storage::KeyRefManager mCryptoStorageKeyRefManager;
+#endif
 
     Ip6::Ip6    mIp6;
     ThreadNetif mThreadNetif;
@@ -497,8 +548,16 @@ private:
     Dns::Dso mDnsDso;
 #endif
 
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+    Dns::Multicast::Core mMdnsCore;
+#endif
+
 #if OPENTHREAD_CONFIG_SNTP_CLIENT_ENABLE
     Sntp::Client mSntpClient;
+#endif
+
+#if OPENTHREAD_FTD && OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
+    BackboneRouter::Local mBackboneRouterLocal;
 #endif
 
     MeshCoP::ActiveDatasetManager  mActiveDataset;
@@ -547,7 +606,7 @@ private:
     MeshCoP::Commissioner mCommissioner;
 #endif
 
-#if OPENTHREAD_CONFIG_DTLS_ENABLE
+#if OPENTHREAD_CONFIG_SECURE_TRANSPORT_ENABLE
     Tmf::SecureAgent mTmfSecureAgent;
 #endif
 
@@ -569,7 +628,6 @@ private:
 #endif
 
 #if OPENTHREAD_FTD && OPENTHREAD_CONFIG_BACKBONE_ROUTER_ENABLE
-    BackboneRouter::Local   mBackboneRouterLocal;
     BackboneRouter::Manager mBackboneRouterManager;
 #endif
 
@@ -583,6 +641,9 @@ private:
 
 #if OPENTHREAD_CONFIG_SRP_SERVER_ENABLE
     Srp::Server mSrpServer;
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+    Srp::AdvertisingProxy mSrpAdvertisingProxy;
+#endif
 #endif
 
 #if OPENTHREAD_FTD
@@ -615,7 +676,11 @@ private:
 #endif
 
 #if OPENTHREAD_CONFIG_COAP_SECURE_API_ENABLE
-    Coap::CoapSecure mApplicationCoapSecure;
+    Coap::ApplicationCoapSecure mApplicationCoapSecure;
+#endif
+
+#if OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
+    Ble::BleSecure mApplicationBleSecure;
 #endif
 
 #if OPENTHREAD_CONFIG_PING_SENDER_ENABLE
@@ -626,7 +691,8 @@ private:
     Utils::ChannelMonitor mChannelMonitor;
 #endif
 
-#if OPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE && OPENTHREAD_FTD
+#if OPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE && \
+    (OPENTHREAD_FTD || OPENTHREAD_CONFIG_CHANNEL_MANAGER_CSL_CHANNEL_SELECT_ENABLE)
     Utils::ChannelManager mChannelManager;
 #endif
 
@@ -668,10 +734,6 @@ private:
     Mac::LinkRaw mLinkRaw;
 #endif
 
-#if OPENTHREAD_CONFIG_LOG_LEVEL_DYNAMIC_ENABLE
-    static LogLevel sLogLevel;
-#endif
-
 #if OPENTHREAD_ENABLE_VENDOR_EXTENSION
     Extension::ExtensionBase &mExtension;
 #endif
@@ -684,10 +746,6 @@ private:
 #endif
 
     bool mIsInitialized;
-
-#if OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE && (OPENTHREAD_FTD || OPENTHREAD_MTD)
-    static bool sDnsNameCompressionEnabled;
-#endif
 
     uint32_t mId;
 };
@@ -704,7 +762,7 @@ template <> inline Radio &Instance::Get(void) { return mRadio; }
 template <> inline Radio::Callbacks &Instance::Get(void) { return mRadio.mCallbacks; }
 
 #if OPENTHREAD_CONFIG_RADIO_STATS_ENABLE && (OPENTHREAD_FTD || OPENTHREAD_MTD)
-template <> inline RadioStatistics &Instance::Get(void) { return mRadio.mRadioStatistics; }
+template <> inline Radio::Statistics &Instance::Get(void) { return mRadio.mStatistics; }
 #endif
 
 #if OPENTHREAD_CONFIG_UPTIME_ENABLE
@@ -721,6 +779,10 @@ template <> inline Settings &Instance::Get(void) { return mSettings; }
 template <> inline SettingsDriver &Instance::Get(void) { return mSettingsDriver; }
 
 template <> inline MeshForwarder &Instance::Get(void) { return mMeshForwarder; }
+
+#if OPENTHREAD_CONFIG_PLATFORM_KEY_REFERENCES_ENABLE
+template <> inline Crypto::Storage::KeyRefManager &Instance::Get(void) { return mCryptoStorageKeyRefManager; }
+#endif
 
 #if OPENTHREAD_CONFIG_MULTI_RADIO
 template <> inline RadioSelector &Instance::Get(void) { return mRadioSelector; }
@@ -740,6 +802,10 @@ template <> inline NeighborTable &Instance::Get(void) { return mMleRouter.mNeigh
 template <> inline ChildTable &Instance::Get(void) { return mMleRouter.mChildTable; }
 
 template <> inline RouterTable &Instance::Get(void) { return mMleRouter.mRouterTable; }
+#endif
+
+#if OPENTHREAD_CONFIG_WAKEUP_COORDINATOR_ENABLE
+template <> inline WakeupTxScheduler &Instance::Get(void) { return mMleRouter.mWakeupTxScheduler; }
 #endif
 
 template <> inline Ip6::Netif &Instance::Get(void) { return mThreadNetif; }
@@ -770,9 +836,15 @@ template <> inline Ip6::Filter &Instance::Get(void) { return mIp6Filter; }
 
 template <> inline AddressResolver &Instance::Get(void) { return mAddressResolver; }
 
-#if OPENTHREAD_FTD
-
+#if OPENTHREAD_FTD || OPENTHREAD_CONFIG_MAC_CSL_TRANSMITTER_ENABLE
 template <> inline IndirectSender &Instance::Get(void) { return mMeshForwarder.mIndirectSender; }
+#endif
+
+#if OPENTHREAD_CONFIG_MAC_CSL_TRANSMITTER_ENABLE
+template <> inline CslTxScheduler &Instance::Get(void) { return mMeshForwarder.mIndirectSender.mCslTxScheduler; }
+#endif
+
+#if OPENTHREAD_FTD
 
 template <> inline SourceMatchController &Instance::Get(void)
 {
@@ -780,10 +852,6 @@ template <> inline SourceMatchController &Instance::Get(void)
 }
 
 template <> inline DataPollHandler &Instance::Get(void) { return mMeshForwarder.mIndirectSender.mDataPollHandler; }
-
-#if OPENTHREAD_CONFIG_MAC_CSL_TRANSMITTER_ENABLE
-template <> inline CslTxScheduler &Instance::Get(void) { return mMeshForwarder.mIndirectSender.mCslTxScheduler; }
-#endif
 
 template <> inline MeshCoP::Leader &Instance::Get(void) { return mLeader; }
 
@@ -830,7 +898,7 @@ template <> inline Ip6::Mpl &Instance::Get(void) { return mIp6.mMpl; }
 
 template <> inline Tmf::Agent &Instance::Get(void) { return mTmfAgent; }
 
-#if OPENTHREAD_CONFIG_DTLS_ENABLE
+#if OPENTHREAD_CONFIG_SECURE_TRANSPORT_ENABLE
 template <> inline Tmf::SecureAgent &Instance::Get(void) { return mTmfSecureAgent; }
 #endif
 
@@ -856,6 +924,10 @@ template <> inline EnergyScanClient &Instance::Get(void) { return mCommissioner.
 template <> inline PanIdQueryClient &Instance::Get(void) { return mCommissioner.GetPanIdQueryClient(); }
 #endif
 
+#if OPENTHREAD_CONFIG_PLATFORM_DNSSD_ENABLE || OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+template <> inline Dnssd &Instance::Get(void) { return mDnssd; }
+#endif
+
 #if OPENTHREAD_CONFIG_JOINER_ENABLE
 template <> inline MeshCoP::Joiner &Instance::Get(void) { return mJoiner; }
 #endif
@@ -878,6 +950,10 @@ template <> inline Dns::ServiceDiscovery::Server &Instance::Get(void) { return m
 
 #if OPENTHREAD_CONFIG_DNS_DSO_ENABLE
 template <> inline Dns::Dso &Instance::Get(void) { return mDnsDso; }
+#endif
+
+#if OPENTHREAD_CONFIG_MULTICAST_DNS_ENABLE
+template <> inline Dns::Multicast::Core &Instance::Get(void) { return mMdnsCore; }
 #endif
 
 template <> inline NetworkDiagnostic::Server &Instance::Get(void) { return mNetworkDiagnosticServer; }
@@ -923,7 +999,8 @@ template <> inline Utils::PingSender &Instance::Get(void) { return mPingSender; 
 template <> inline Utils::ChannelMonitor &Instance::Get(void) { return mChannelMonitor; }
 #endif
 
-#if OPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE && OPENTHREAD_FTD
+#if OPENTHREAD_CONFIG_CHANNEL_MANAGER_ENABLE && \
+    (OPENTHREAD_FTD || OPENTHREAD_CONFIG_CHANNEL_MANAGER_CSL_CHANNEL_SELECT_ENABLE)
 template <> inline Utils::ChannelManager &Instance::Get(void) { return mChannelManager; }
 #endif
 
@@ -945,6 +1022,13 @@ template <> inline MeshCoP::DatasetUpdater &Instance::Get(void) { return mDatase
 
 #if OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE
 template <> inline MeshCoP::BorderAgent &Instance::Get(void) { return mBorderAgent; }
+#endif
+
+#if OPENTHREAD_CONFIG_BORDER_AGENT_ENABLE && OPENTHREAD_CONFIG_BORDER_AGENT_EPHEMERAL_KEY_ENABLE
+template <> inline MeshCoP::BorderAgent::EphemeralKeyManager &Instance::Get(void)
+{
+    return mBorderAgent.GetEphemeralKeyManager();
+}
 #endif
 
 #if OPENTHREAD_CONFIG_ANNOUNCE_SENDER_ENABLE
@@ -1007,7 +1091,7 @@ template <> inline Utils::Otns &Instance::Get(void) { return mOtns; }
 template <> inline BorderRouter::RoutingManager &Instance::Get(void) { return mRoutingManager; }
 
 template <> inline BorderRouter::InfraIf &Instance::Get(void) { return mRoutingManager.mInfraIf; }
-#endif // OPENTHREAD_CONFIG_BORDER_ROUTING_ENABLE
+#endif
 
 #if OPENTHREAD_CONFIG_NAT64_TRANSLATOR_ENABLE
 template <> inline Nat64::Translator &Instance::Get(void) { return mNat64Translator; }
@@ -1015,6 +1099,13 @@ template <> inline Nat64::Translator &Instance::Get(void) { return mNat64Transla
 
 #if OPENTHREAD_CONFIG_SRP_SERVER_ENABLE
 template <> inline Srp::Server &Instance::Get(void) { return mSrpServer; }
+#if OPENTHREAD_CONFIG_SRP_SERVER_ADVERTISING_PROXY_ENABLE
+template <> inline Srp::AdvertisingProxy &Instance::Get(void) { return mSrpAdvertisingProxy; }
+#endif
+#endif // OPENTHREAD_CONFIG_SRP_SERVER_ENABLE
+
+#if OPENTHREAD_CONFIG_BLE_TCAT_ENABLE
+template <> inline Ble::BleSecure &Instance::Get(void) { return mApplicationBleSecure; }
 #endif
 
 #endif // OPENTHREAD_MTD || OPENTHREAD_FTD
@@ -1048,9 +1139,37 @@ template <> inline FactoryDiags::Diags &Instance::Get(void) { return mDiags; }
 template <> inline Utils::PowerCalibration &Instance::Get(void) { return mPowerCalibration; }
 #endif
 
+//---------------------------------------------------------------------------------------------------------------------
+
+template <typename InstanceGetProvider>
+template <typename Type>
+inline Type &GetProvider<InstanceGetProvider>::Get(void) const
+{
+    return static_cast<const InstanceGetProvider *>(this)->GetInstance().template Get<Type>();
+}
+
+template <typename Owner, void (Owner::*HandleTaskletPtr)(void)>
+void TaskletIn<Owner, HandleTaskletPtr>::HandleTasklet(Tasklet &aTasklet)
+{
+    (aTasklet.Get<Owner>().*HandleTaskletPtr)();
+}
+
+template <typename Owner, void (Owner::*HandleTimertPtr)(void)>
+void TimerMilliIn<Owner, HandleTimertPtr>::HandleTimer(Timer &aTimer)
+{
+    (aTimer.Get<Owner>().*HandleTimertPtr)();
+}
+
+#if OPENTHREAD_CONFIG_PLATFORM_USEC_TIMER_ENABLE
+template <typename Owner, void (Owner::*HandleTimertPtr)(void)>
+void TimerMicroIn<Owner, HandleTimertPtr>::HandleTimer(Timer &aTimer)
+{
+    (aTimer.Get<Owner>().*HandleTimertPtr)();
+}
+#endif
+
 /**
  * @}
- *
  */
 
 } // namespace ot

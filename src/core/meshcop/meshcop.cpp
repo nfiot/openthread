@@ -34,13 +34,8 @@
 
 #include "meshcop.hpp"
 
-#include "common/crc16.hpp"
-#include "common/debug.hpp"
-#include "common/locator_getters.hpp"
-#include "common/string.hpp"
-#include "crypto/sha256.hpp"
-#include "mac/mac_types.hpp"
-#include "thread/thread_netif.hpp"
+#include "common/crc.hpp"
+#include "instance/instance.hpp"
 
 namespace ot {
 
@@ -94,7 +89,7 @@ bool JoinerPskd::IsPskdValid(const char *aPskdString)
     {
         char c = aPskdString[i];
 
-        VerifyOrExit(isdigit(c) || isupper(c));
+        VerifyOrExit(IsDigit(c) || IsUppercase(c));
         VerifyOrExit(c != 'I' && c != 'O' && c != 'Q' && c != 'Z');
     }
 
@@ -191,7 +186,7 @@ void SteeringData::Init(uint8_t aLength)
 {
     OT_ASSERT(aLength <= kMaxLength);
     mLength = aLength;
-    memset(m8, 0, sizeof(m8));
+    ClearAllBytes(m8);
 }
 
 void SteeringData::SetToPermitAllJoiners(void)
@@ -249,17 +244,8 @@ bool SteeringData::Contains(const HashBitIndexes &aIndexes) const
 
 void SteeringData::CalculateHashBitIndexes(const Mac::ExtAddress &aJoinerId, HashBitIndexes &aIndexes)
 {
-    Crc16 ccitt(Crc16::kCcitt);
-    Crc16 ansi(Crc16::kAnsi);
-
-    for (uint8_t b : aJoinerId.m8)
-    {
-        ccitt.Update(b);
-        ansi.Update(b);
-    }
-
-    aIndexes.mIndex[0] = ccitt.Get();
-    aIndexes.mIndex[1] = ansi.Get();
+    aIndexes.mIndex[0] = CrcCalculator<uint16_t>(kCrc16CcittPolynomial).Feed(aJoinerId);
+    aIndexes.mIndex[1] = CrcCalculator<uint16_t>(kCrc16AnsiPolynomial).Feed(aJoinerId);
 }
 
 void SteeringData::CalculateHashBitIndexes(const JoinerDiscerner &aDiscerner, HashBitIndexes &aIndexes)
@@ -324,7 +310,7 @@ Error GeneratePskc(const char          *aPassPhrase,
                      (networkNameLen <= OT_NETWORK_NAME_MAX_SIZE),
                  error = kErrorInvalidArgs);
 
-    memset(salt, 0, sizeof(salt));
+    ClearAllBytes(salt);
     memcpy(salt, saltPrefix, sizeof(saltPrefix) - 1);
     saltLen += static_cast<uint16_t>(sizeof(saltPrefix) - 1);
 
@@ -334,22 +320,32 @@ Error GeneratePskc(const char          *aPassPhrase,
     memcpy(salt + saltLen, aNetworkName.GetAsCString(), networkNameLen);
     saltLen += networkNameLen;
 
-    otPlatCryptoPbkdf2GenerateKey(reinterpret_cast<const uint8_t *>(aPassPhrase), passphraseLen, salt, saltLen, 16384,
-                                  OT_PSKC_MAX_SIZE, aPskc.m8);
+    error = otPlatCryptoPbkdf2GenerateKey(reinterpret_cast<const uint8_t *>(aPassPhrase), passphraseLen, salt, saltLen,
+                                          16384, OT_PSKC_MAX_SIZE, aPskc.m8);
 
 exit:
     return error;
 }
 #endif // OPENTHREAD_FTD
 
-#if OT_SHOULD_LOG_AT(OT_LOG_LEVEL_WARN)
-void LogError(const char *aActionText, Error aError)
+#if OPENTHREAD_CONFIG_REFERENCE_DEVICE_ENABLE
+
+void LogCertMessage(const char *aText, const Coap::Message &aMessage)
 {
-    if (aError != kErrorNone && aError != kErrorAlready)
-    {
-        LogWarn("Failed to %s: %s", aActionText, ErrorToString(aError));
-    }
+    OT_UNUSED_VARIABLE(aText);
+
+    uint8_t  buf[kBufferSize];
+    uint16_t length = aMessage.GetLength() - aMessage.GetOffset();
+
+    VerifyOrExit(length <= sizeof(buf));
+    aMessage.ReadBytes(aMessage.GetOffset(), buf, length);
+
+    DumpCert(aText, buf, length);
+
+exit:
+    return;
 }
+
 #endif
 
 } // namespace MeshCoP
